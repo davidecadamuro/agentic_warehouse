@@ -90,16 +90,34 @@ python src/simulation.py
 pytest -q
 ```
 
-## Live LLM mode
+## Live LLM mode and runtime configuration
 
-If you provide an OpenAI API key in the environment, agents can use the live OpenAI SDK instead of deterministic mock mode:
+The simulation supports explicit runtime configuration for both the mock/offline mode and the OpenAI model.
+
+### Using the CLI
+
+```bash
+python src/simulation.py --mock-mode true --model gpt-4o-mini
+```
+
+```bash
+python src/simulation.py --mock-mode false --model gpt-4.1-mini
+```
+
+### Using environment variables
 
 ```bash
 export OPENAI_API_KEY="your-key-here"
+export OPENAI_MODEL="gpt-4o-mini"
+export WAREHOUSE_MOCK_MODE="False"
 python src/simulation.py
 ```
 
-Without an API key, the project runs in offline mock mode for reproducible simulations and unit tests.
+If `WAREHOUSE_MOCK_MODE` is not set, the project falls back to the presence of `OPENAI_API_KEY`:
+- `OPENAI_API_KEY` missing => mock mode is enabled automatically
+- `OPENAI_API_KEY` present => live OpenAI mode is used unless overridden by the CLI or environment
+
+If `OPENAI_MODEL` is not set, the default model is `gpt-6-luna`.
 
 ## Documentation
 
