@@ -52,9 +52,16 @@ def resolve_mock_mode(mock_mode: Optional[bool] = None) -> bool:
     return False
 
 
-async def run_simulation(mock_mode: Optional[bool] = None) -> None:
+def resolve_model(model: Optional[str] = None) -> str:
+    if model is not None:
+        return model
+    return os.getenv("OPENAI_MODEL", "gpt-6-luna")
+
+
+async def run_simulation(mock_mode: Optional[bool] = None, model: Optional[str] = None) -> None:
     resolved_mock_mode = resolve_mock_mode(mock_mode)
-    print(f"\n[CONFIG] mock_mode={resolved_mock_mode}")
+    resolved_model = resolve_model(model)
+    print(f"\n[CONFIG] mock_mode={resolved_mock_mode}, model={resolved_model}")
     print("\n" + "=" * 80)
     print("      WAREHOUSE AGENTIC SWARM SIMULATION - COMMENCING DAY SHIFT")
     print("=" * 80 + "\n")
@@ -65,12 +72,12 @@ async def run_simulation(mock_mode: Optional[bool] = None) -> None:
     await bus.start()
 
     # 2. Instantiate and initialize all 6 agents
-    receiving_agent = ReceivingAgent(event_bus=bus, mock_mode=resolved_mock_mode)
-    putaway_agent = PutawayAgent(event_bus=bus, mock_mode=resolved_mock_mode)
-    transport_agent = TransportAgent(event_bus=bus, mock_mode=resolved_mock_mode)
-    inventory_agent = InventoryAgent(event_bus=bus, mock_mode=resolved_mock_mode, replenishment_threshold=25)
-    order_agent = OrderFulfillmentAgent(event_bus=bus, mock_mode=resolved_mock_mode)
-    exception_agent = ExceptionAgent(event_bus=bus, mock_mode=resolved_mock_mode)
+    receiving_agent = ReceivingAgent(event_bus=bus, mock_mode=resolved_mock_mode, model=resolved_model)
+    putaway_agent = PutawayAgent(event_bus=bus, mock_mode=resolved_mock_mode, model=resolved_model)
+    transport_agent = TransportAgent(event_bus=bus, mock_mode=resolved_mock_mode, model=resolved_model)
+    inventory_agent = InventoryAgent(event_bus=bus, mock_mode=resolved_mock_mode, model=resolved_model, replenishment_threshold=25)
+    order_agent = OrderFulfillmentAgent(event_bus=bus, mock_mode=resolved_mock_mode, model=resolved_model)
+    exception_agent = ExceptionAgent(event_bus=bus, mock_mode=resolved_mock_mode, model=resolved_model)
 
     agents = [
         receiving_agent,
@@ -228,6 +235,10 @@ if __name__ == "__main__":
         choices=("true", "false"),
         help="Set mock_mode explicitly to 'true' or 'false'. If omitted, it falls back to WAREHOUSE_MOCK_MODE or OPENAI_API_KEY.",
     )
+    parser.add_argument(
+        "--model",
+        help="OpenAI model to use for agent reasoning. Defaults to OPENAI_MODEL or gpt-4o-mini.",
+    )
     args = parser.parse_args()
     mock_mode = None if args.mock_mode is None else args.mock_mode.lower() == "true"
-    asyncio.run(run_simulation(mock_mode=mock_mode))
+    asyncio.run(run_simulation(mock_mode=mock_mode, model=args.model))

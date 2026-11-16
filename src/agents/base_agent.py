@@ -36,7 +36,7 @@ class BaseAgent(ABC):
         name: str,
         system_prompt: str,
         event_bus: EventBus,
-        model: str = "gpt-4o-mini",
+        model: Optional[str] = None,
         client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
     ) -> None:
