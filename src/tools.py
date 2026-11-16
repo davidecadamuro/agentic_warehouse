@@ -555,6 +555,7 @@ def get_inventory_summary(sku: Optional[str] = None) -> Dict[str, Any]:
 def audit_ledger_history(limit: int = 20) -> List[Dict[str, Any]]:
     """Returns the most recent ledger transactions for tracing consistency."""
     with WAREHOUSE_DB._lock:
+        recent_entries = list(WAREHOUSE_DB.ledger)[-limit:]
         return [
             {
                 "tx_id": entry.transaction_id,
@@ -566,7 +567,7 @@ def audit_ledger_history(limit: int = 20) -> List[Dict[str, Any]]:
                 "correlation_id": entry.correlation_id,
                 "timestamp": entry.timestamp.isoformat(),
             }
-            for entry in WAREHOUSE_DB.ledger[-limit:]
+            for entry in recent_entries
         ]
 
 
