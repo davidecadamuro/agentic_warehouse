@@ -12,8 +12,11 @@ Runs a concurrent multi-agent simulation demonstrating:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
+import os
+from typing import Optional
 
 from agents import (
     ExceptionAgent,
@@ -34,7 +37,24 @@ logging.basicConfig(
 logger = logging.getLogger("warehouse.simulation")
 
 
-async def run_simulation() -> None:
+def resolve_mock_mode(mock_mode: Optional[bool] = None) -> bool:
+    if mock_mode is not None:
+        return bool(mock_mode)
+
+    env_value = os.getenv("WAREHOUSE_MOCK_MODE")
+    if env_value is not None:
+        if env_value == "True":
+            return True
+        if env_value == "False":
+            return False
+        raise ValueError("WAREHOUSE_MOCK_MODE must be set to either 'True' or 'False'.")
+
+    return False
+
+
+async def run_simulation(mock_mode: Optional[bool] = None) -> None:
+    resolved_mock_mode = resolve_mock_mode(mock_mode)
+    print(f"\n[CONFIG] mock_mode={resolved_mock_mode}")
     print("\n" + "=" * 80)
     print("      WAREHOUSE AGENTIC SWARM SIMULATION - COMMENCING DAY SHIFT")
     print("=" * 80 + "\n")
@@ -45,12 +65,12 @@ async def run_simulation() -> None:
     await bus.start()
 
     # 2. Instantiate and initialize all 6 agents
-    receiving_agent = ReceivingAgent(event_bus=bus, mock_mode=True)
-    putaway_agent = PutawayAgent(event_bus=bus, mock_mode=True)
-    transport_agent = TransportAgent(event_bus=bus, mock_mode=True)
-    inventory_agent = InventoryAgent(event_bus=bus, mock_mode=True, replenishment_threshold=25)
-    order_agent = OrderFulfillmentAgent(event_bus=bus, mock_mode=True)
-    exception_agent = ExceptionAgent(event_bus=bus, mock_mode=True)
+    receiving_agent = ReceivingAgent(event_bus=bus, mock_mode=resolved_mock_mode)
+    putaway_agent = PutawayAgent(event_bus=bus, mock_mode=resolved_mock_mode)
+    transport_agent = TransportAgent(event_bus=bus, mock_mode=resolved_mock_mode)
+    inventory_agent = InventoryAgent(event_bus=bus, mock_mode=resolved_mock_mode, replenishment_threshold=25)
+    order_agent = OrderFulfillmentAgent(event_bus=bus, mock_mode=resolved_mock_mode)
+    exception_agent = ExceptionAgent(event_bus=bus, mock_mode=resolved_mock_mode)
 
     agents = [
         receiving_agent,
@@ -202,4 +222,12 @@ async def run_simulation() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run_simulation())
+    parser = argparse.ArgumentParser(description="Run the warehouse swarm simulation.")
+    parser.add_argument(
+        "--mock-mode",
+        choices=("true", "false"),
+        help="Set mock_mode explicitly to 'true' or 'false'. If omitted, it falls back to WAREHOUSE_MOCK_MODE or OPENAI_API_KEY.",
+    )
+    args = parser.parse_args()
+    mock_mode = None if args.mock_mode is None else args.mock_mode.lower() == "true"
+    asyncio.run(run_simulation(mock_mode=mock_mode))

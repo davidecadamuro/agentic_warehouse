@@ -45,10 +45,12 @@ class BaseAgent(ABC):
         self.event_bus = event_bus
         self.model = model
 
-        # Determine whether to use real OpenAI client or offline simulation fallback
+        # Determine whether to use real OpenAI client or offline simulation fallback.
+        # Respect an explicit mock_mode value, and only fall back to the environment
+        # when the caller has not specified a choice.
         api_key = os.getenv("OPENAI_API_KEY")
         if mock_mode is not None:
-            self.mock_mode = mock_mode
+            self.mock_mode = bool(mock_mode)
         else:
             self.mock_mode = not bool(api_key or client)
 
