@@ -9,7 +9,10 @@ re-routes affected agents, or notifies human operators.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Deque, Dict, Optional
+
+from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
 from broker.base import EventBus
@@ -39,16 +42,19 @@ class ExceptionAgent(BaseAgent):
         self,
         event_bus: EventBus,
         model: str = "gpt-4o-mini",
+        client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
+        max_incident_log_size: int = 500,
     ) -> None:
         super().__init__(
             name="ExceptionAgent",
             system_prompt=EXCEPTION_SYSTEM_PROMPT,
             event_bus=event_bus,
             model=model,
+            client=client,
             mock_mode=mock_mode,
         )
-        self.incident_log: list[Dict[str, Any]] = []
+        self.incident_log: Deque[Dict[str, Any]] = deque(maxlen=max_incident_log_size)
         self._setup_tools()
 
     def _setup_tools(self) -> None:
@@ -102,8 +108,7 @@ class ExceptionAgent(BaseAgent):
             f"Obstacle reported in Zone '{zone_id}': {reason}.\n"
             f"Lock corridor zone to prevent collisions and reroute other agents."
         )
-        self._current_exception_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
 
     async def handle_obstacle_cleared(self, topic: str, event: WarehouseEvent) -> None:
         """Invoked when maintenance clears a corridor."""
@@ -111,8 +116,7 @@ class ExceptionAgent(BaseAgent):
         zone_id = payload.get("zone_id", "A")
 
         prompt = f"Zone '{zone_id}' has been cleared by maintenance. Restore access."
-        self._current_exception_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
 
     async def handle_pallet_quarantined(self, topic: str, event: WarehouseEvent) -> None:
         """Invoked when ReceivingAgent flags damaged goods."""
@@ -125,15 +129,59 @@ class ExceptionAgent(BaseAgent):
             "timestamp": event.timestamp.isoformat(),
         })
 
+    async def on_turn_completed(
+        self,
+        turn_response: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        executed_tools: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        """Emits corridor blocked/unblocked events based on executed tools in live mode."""
+        if not executed_tools:
+            return
+
+        for tool in executed_tools:
+            tool_name = tool.get("tool_name")
+            result = tool.get("result", {})
+            if not result.get("success"):
+                continue
+
+            if tool_name == "block_corridor_zone":
+                zone_id = result.get("blocked_zone")
+                reason = result.get("reason", "Incident reported")
+                await self.publish(
+                    "warehouse.corridor.blocked",
+                    WarehouseEvent(
+                        event_type=EventType.CORRIDOR_BLOCKED,
+                        payload={"zone_id": zone_id, "reason": reason},
+                        correlation_id=correlation_id or "CORR-BLOCK-LIVE",
+                        source_agent=self.name,
+                    ),
+                )
+            elif tool_name == "unblock_corridor_zone":
+                zone_id = result.get("unblocked_zone")
+                await self.publish(
+                    "warehouse.corridor.unblocked",
+                    WarehouseEvent(
+                        event_type=EventType.CORRIDOR_UNBLOCKED,
+                        payload={"zone_id": zone_id},
+                        correlation_id=correlation_id or "CORR-UNBLOCK-LIVE",
+                        source_agent=self.name,
+                    ),
+                )
+
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic mock reasoning loop executing corridor locks and logging incidents.
         """
         logger.info("[ExceptionAgent] Mock reasoning: managing corridor safety...")
 
-        payload = getattr(self, "_current_exception_context", {})
+        payload = context or {}
         zone_id = payload.get("zone_id", "A")
         reason = payload.get("reason", "Reported anomaly")
 

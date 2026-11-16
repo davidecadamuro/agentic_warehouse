@@ -10,7 +10,9 @@ them complete upon arrival.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
 from broker.base import EventBus
@@ -46,6 +48,7 @@ class TransportAgent(BaseAgent):
         self,
         event_bus: EventBus,
         model: str = "gpt-4o-mini",
+        client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
     ) -> None:
         super().__init__(
@@ -53,6 +56,7 @@ class TransportAgent(BaseAgent):
             system_prompt=TRANSPORT_SYSTEM_PROMPT,
             event_bus=event_bus,
             model=model,
+            client=client,
             mock_mode=mock_mode,
         )
         self._setup_tools()
@@ -131,11 +135,44 @@ class TransportAgent(BaseAgent):
             f"Query available vehicles, dispatch mission, and confirm arrival."
         )
 
-        self._current_transport_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
+
+    async def on_turn_completed(
+        self,
+        turn_response: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        executed_tools: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        """Emits transport completed event when a mission is completed in live mode."""
+        if not executed_tools:
+            return
+
+        for tool in executed_tools:
+            if tool.get("tool_name") == "complete_transport_mission":
+                result = tool.get("result", {})
+                if result.get("success"):
+                    await self.publish(
+                        "warehouse.transport.completed",
+                        WarehouseEvent(
+                            event_type=EventType.TRANSPORT_COMPLETED,
+                            payload={
+                                "mission_id": result.get("mission_id"),
+                                "pallet_id": result.get("pallet_id"),
+                                "vehicle_id": result.get("vehicle_id"),
+                                "source": (context or {}).get("source", "UNKNOWN"),
+                                "destination": result.get("new_location"),
+                            },
+                            correlation_id=correlation_id or "CORR-TRANSPORT-LIVE",
+                            source_agent=self.name,
+                        ),
+                    )
 
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic mock reasoning loop mirroring the LLM fleet dispatch.
@@ -143,7 +180,7 @@ class TransportAgent(BaseAgent):
         """
         logger.info("[TransportAgent] Mock reasoning: dispatching vehicle mission...")
 
-        payload = getattr(self, "_current_transport_context", {})
+        payload = context or {}
         pallet_id = payload.get("pallet_id", "PLT-UNKNOWN")
         source = payload.get("source", "DOCK-1")
         destination = payload.get("destination", "UNKNOWN")
@@ -163,6 +200,7 @@ class TransportAgent(BaseAgent):
             source=source,
             destination=destination,
             preferred_vehicle_id=chosen_vehicle_id,
+            correlation_id=correlation_id,
         )
 
         if not dispatch_res.get("success"):
@@ -173,7 +211,7 @@ class TransportAgent(BaseAgent):
         logger.info(f"[TransportAgent] Dispatched mission '{mission_id}' using vehicle '{chosen_vehicle_id}'")
 
         # 3. Simulate arrival and completion
-        complete_res = complete_transport_mission(mission_id=mission_id)
+        complete_res = complete_transport_mission(mission_id=mission_id, correlation_id=correlation_id)
         if not complete_res.get("success"):
             logger.error(f"[TransportAgent] Mission completion failed: {complete_res.get('error')}")
             return f"Completion error: {complete_res.get('error')}"

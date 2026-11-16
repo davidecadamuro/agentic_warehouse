@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from openai import AsyncOpenAI
+
 from agents.base_agent import BaseAgent
 from broker.base import EventBus
 from models import EventType, WarehouseEvent
@@ -40,6 +42,7 @@ class OrderFulfillmentAgent(BaseAgent):
         self,
         event_bus: EventBus,
         model: str = "gpt-4o-mini",
+        client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
     ) -> None:
         super().__init__(
@@ -47,6 +50,7 @@ class OrderFulfillmentAgent(BaseAgent):
             system_prompt=ORDER_SYSTEM_PROMPT,
             event_bus=event_bus,
             model=model,
+            client=client,
             mock_mode=mock_mode,
         )
         self._pending_orders: Dict[str, Dict[str, Any]] = {}
@@ -113,8 +117,7 @@ class OrderFulfillmentAgent(BaseAgent):
             f"Check availability and reserve inventory."
         )
 
-        self._current_order_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
 
     async def handle_transport_completed(self, topic: str, event: WarehouseEvent) -> None:
         """Invoked when an AGV completes delivery of picked items to PACKING-BAY-1."""
@@ -126,15 +129,19 @@ class OrderFulfillmentAgent(BaseAgent):
             pallet_id = payload.get("pallet_id")
             logger.info(f"[{self.name}] Pallet '{pallet_id}' arrived at PACKING-BAY-1. Proceeding to pack.")
 
-            # Identify matching order for pallet
+            # Identify matching order strictly by exact pallet_id or allocated_pallets
             matched_order_id = None
             for ord_id, data in self._pending_orders.items():
-                if data.get("pallet_id") == pallet_id or data.get("status") == "RESERVED":
+                allocated_pids = data.get("allocated_pallet_ids", [])
+                if data.get("pallet_id") == pallet_id or pallet_id in allocated_pids:
                     matched_order_id = ord_id
                     break
 
             if matched_order_id:
-                dispatch_res = pack_and_dispatch_order(matched_order_id)
+                dispatch_res = pack_and_dispatch_order(
+                    matched_order_id,
+                    correlation_id=event.correlation_id,
+                )
                 if dispatch_res.get("success"):
                     self._pending_orders.pop(matched_order_id, None)
                     await self.publish(
@@ -147,20 +154,97 @@ class OrderFulfillmentAgent(BaseAgent):
                         ),
                     )
 
+                    # Trigger return transport for any residual stock on partially picked pallets
+                    for residual in dispatch_res.get("residual_pallets", []):
+                        r_pallet_id = residual["pallet_id"]
+                        return_bin = residual["return_bin_id"]
+                        logger.info(
+                            f"[{self.name}] Residual stock detected ({residual['remaining_quantity']} units) "
+                            f"on pallet '{r_pallet_id}'. Dispatching return transport to '{return_bin}'."
+                        )
+                        await self.publish(
+                            "warehouse.transport.requested",
+                            WarehouseEvent(
+                                event_type=EventType.PUTAWAY_REQUESTED,
+                                payload={
+                                    "pallet_id": r_pallet_id,
+                                    "sku": residual.get("sku", "SKU-UNKNOWN"),
+                                    "source": "PACKING-BAY-1",
+                                    "destination": return_bin,
+                                    "weight_kg": residual.get("weight_kg", 200.0),
+                                },
+                                correlation_id=event.correlation_id,
+                                source_agent=self.name,
+                            ),
+                        )
+
+    async def on_turn_completed(
+        self,
+        turn_response: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        executed_tools: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        """Emits pick transport requests when stock reservation succeeds in live mode."""
+        if not executed_tools or not context:
+            return
+
+        order_id = context.get("order_id", "ORD-UNKNOWN")
+        for tool in executed_tools:
+            if tool.get("tool_name") == "check_and_reserve_stock":
+                result = tool.get("result", {})
+                if result.get("success"):
+                    allocations = result.get("allocations", [])
+                    allocated_pids = [alloc.get("pallet_id") for alloc in allocations if alloc.get("pallet_id")]
+                    if order_id in self._pending_orders:
+                        self._pending_orders[order_id]["allocated_pallet_ids"] = allocated_pids
+                        self._pending_orders[order_id]["status"] = "RESERVED"
+
+                    for alloc in allocations:
+                        bin_id = alloc.get("bin_id")
+                        pallet_id = alloc.get("pallet_id")
+
+                        if order_id in self._pending_orders:
+                            self._pending_orders[order_id]["pallet_id"] = pallet_id
+
+                        await self.publish(
+                            "warehouse.transport.requested",
+                            WarehouseEvent(
+                                event_type=EventType.PICK_DISPATCHED,
+                                payload={
+                                    "order_id": order_id,
+                                    "pallet_id": pallet_id,
+                                    "source": bin_id,
+                                    "destination": "PACKING-BAY-1",
+                                    "weight_kg": 200.0,
+                                },
+                                correlation_id=correlation_id or "CORR-PICK-LIVE",
+                                source_agent=self.name,
+                            ),
+                        )
+
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic mock reasoning loop reserving stock and initiating pick missions.
         """
         logger.info("[OrderFulfillmentAgent] Mock reasoning: checking stock and allocating...")
 
-        payload = getattr(self, "_current_order_context", {})
+        payload = context or {}
         order_id = payload.get("order_id", "ORD-1")
         sku = payload.get("sku", "SKU-WIDGET-A")
         quantity = payload.get("quantity", 10)
 
-        reserve_res = check_and_reserve_stock(sku=sku, quantity=quantity, order_id=order_id)
+        reserve_res = check_and_reserve_stock(
+            sku=sku,
+            quantity=quantity,
+            order_id=order_id,
+            correlation_id=correlation_id,
+        )
         if not reserve_res.get("success"):
             err = reserve_res.get("error", "Insufficient stock")
             logger.warning(f"[OrderFulfillmentAgent] Stock allocation failed for {order_id}: {err}")
@@ -169,6 +253,11 @@ class OrderFulfillmentAgent(BaseAgent):
         allocations = reserve_res["allocations"]
         logger.info(f"[OrderFulfillmentAgent] Successfully reserved {quantity} of {sku} across {len(allocations)} bin(s).")
 
+        allocated_pids = [alloc["pallet_id"] for alloc in allocations]
+        if order_id in self._pending_orders:
+            self._pending_orders[order_id]["allocated_pallet_ids"] = allocated_pids
+            self._pending_orders[order_id]["status"] = "RESERVED"
+
         # Emit pick transport request for each allocated bin to PACKING-BAY-1
         for alloc in allocations:
             bin_id = alloc["bin_id"]
@@ -176,7 +265,6 @@ class OrderFulfillmentAgent(BaseAgent):
 
             if order_id in self._pending_orders:
                 self._pending_orders[order_id]["pallet_id"] = pallet_id
-                self._pending_orders[order_id]["status"] = "RESERVED"
 
             await self.publish(
                 "warehouse.transport.requested",

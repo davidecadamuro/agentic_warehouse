@@ -180,9 +180,10 @@ async def run_simulation() -> None:
     print("=" * 80)
 
     # Print final ledger records
-    print("\nRecent Ledger Transactions:")
+    print("\nRecent Ledger Transactions (with Causal Trace):")
     for entry in WAREHOUSE_DB.ledger:
-        print(f"  [{entry.timestamp.strftime('%H:%M:%S')}] {entry.sku:16} (qty: {entry.quantity:3}) | {entry.source:15} -> {entry.destination:15} | {entry.reason}")
+        corr = entry.correlation_id[:13] + ".." if entry.correlation_id else "N/A          "
+        print(f"  [{entry.timestamp.strftime('%H:%M:%S')}] [corr: {corr:15}] {entry.sku:16} (qty: {entry.quantity:3}) | {entry.source:15} -> {entry.destination:15} | {entry.reason}")
 
     # Print bin occupancy status
     occupied_bins = [b for b in WAREHOUSE_DB.bins.values() if b.status != "EMPTY"]

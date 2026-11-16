@@ -27,7 +27,10 @@ class DummyTestAgent(BaseAgent):
         pass
 
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[dict] = None,
     ) -> str:
         return f"Dummy response to {prompt}"
 

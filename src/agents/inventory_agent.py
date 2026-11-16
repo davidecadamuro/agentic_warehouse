@@ -9,7 +9,9 @@ runs stock reconciliations, and emits replenishment warnings when stock falls be
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
 from broker.base import EventBus
@@ -39,6 +41,7 @@ class InventoryAgent(BaseAgent):
         self,
         event_bus: EventBus,
         model: str = "gpt-4o-mini",
+        client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
         replenishment_threshold: int = 20,
     ) -> None:
@@ -47,6 +50,7 @@ class InventoryAgent(BaseAgent):
             system_prompt=INVENTORY_SYSTEM_PROMPT,
             event_bus=event_bus,
             model=model,
+            client=client,
             mock_mode=mock_mode,
         )
         self.replenishment_threshold = replenishment_threshold
@@ -104,8 +108,7 @@ class InventoryAgent(BaseAgent):
             f"Destination: '{payload.get('destination')}'.\n"
             f"Verify inventory summary and check ledger audit trail."
         )
-        self._current_event_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
 
     async def handle_order_dispatched(self, topic: str, event: WarehouseEvent) -> None:
         """Invoked when an outbound order is packed and dispatched."""
@@ -114,19 +117,20 @@ class InventoryAgent(BaseAgent):
             f"Order '{payload.get('order_id')}' dispatched.\n"
             f"Verify depleted inventory and check if any SKU requires replenishment."
         )
-        self._current_event_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
 
     async def handle_audit_requested(self, topic: str, event: WarehouseEvent) -> None:
         """Invoked on scheduled or manual cycle count audits."""
         payload = event.payload
         sku = payload.get("sku")
         prompt = f"Audit requested for SKU '{sku or 'ALL'}'. Generate comprehensive inventory report."
-        self._current_event_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
 
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic mock reasoning loop verifying inventory summary and ledger consistency.

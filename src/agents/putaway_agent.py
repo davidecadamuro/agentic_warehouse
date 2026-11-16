@@ -9,7 +9,9 @@ reserves the candidate bin atomically, and requests transport dispatch.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
 from broker.base import EventBus
@@ -43,6 +45,7 @@ class PutawayAgent(BaseAgent):
         self,
         event_bus: EventBus,
         model: str = "gpt-4o-mini",
+        client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
     ) -> None:
         super().__init__(
@@ -50,6 +53,7 @@ class PutawayAgent(BaseAgent):
             system_prompt=PUTAWAY_SYSTEM_PROMPT,
             event_bus=event_bus,
             model=model,
+            client=client,
             mock_mode=mock_mode,
         )
         self._setup_tools()
@@ -123,12 +127,46 @@ class PutawayAgent(BaseAgent):
             f"Find an optimal candidate bin and reserve it for putaway."
         )
 
-        # Store contextual metadata for mock_reasoning or LLM execution
-        self._current_pallet_context = payload
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
+
+    async def on_turn_completed(
+        self,
+        turn_response: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        executed_tools: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        """Emits putaway transport requested event when a bin reservation succeeds in live mode."""
+        if not executed_tools or not context:
+            return
+
+        for tool in executed_tools:
+            if tool.get("tool_name") == "reserve_bin_for_putaway":
+                result = tool.get("result", {})
+                if result.get("success"):
+                    bin_id = result.get("bin_id")
+                    pallet_id = result.get("reserved_for")
+                    await self.publish(
+                        "warehouse.transport.requested",
+                        WarehouseEvent(
+                            event_type=EventType.PUTAWAY_REQUESTED,
+                            payload={
+                                "pallet_id": pallet_id,
+                                "sku": context.get("sku", "SKU-UNKNOWN"),
+                                "source": context.get("location", "DOCK-1"),
+                                "destination": bin_id,
+                                "weight_kg": context.get("weight_kg", 300.0),
+                            },
+                            correlation_id=correlation_id or "CORR-PUTAWAY-LIVE",
+                            source_agent=self.name,
+                        ),
+                    )
 
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic mock reasoning loop mirroring the LLM slotting calculation.
@@ -136,7 +174,7 @@ class PutawayAgent(BaseAgent):
         """
         logger.info("[PutawayAgent] Mock reasoning: calculating slotting and reserving bin...")
 
-        payload = getattr(self, "_current_pallet_context", {})
+        payload = context or {}
         pallet_id = payload.get("pallet_id", "PLT-UNKNOWN")
         sku = payload.get("sku", "SKU-UNKNOWN")
         weight_kg = payload.get("weight_kg", 300.0)

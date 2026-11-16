@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 from broker.base import EventBus, EventHandler
 from broker.validator import EventValidator, WarehouseDomainValidator
@@ -65,15 +66,18 @@ class InMemoryEventBus(EventBus):
         self,
         queue_maxsize: int = 1000,
         enable_default_validation: bool = True,
+        max_history_size: int = 1000,
+        max_dlq_size: int = 500,
+        max_rejected_size: int = 500,
     ) -> None:
         self._subscriptions: List[Tuple[str, re.Pattern[str], EventHandler]] = []
         self._queue: asyncio.Queue[Tuple[str, WarehouseEvent]] = asyncio.Queue(maxsize=queue_maxsize)
         self._worker_task: Optional[asyncio.Task[None]] = None
         self._running: bool = False
-        self.dlq: List[DeadLetterEntry] = []
-        self.history: List[Tuple[str, WarehouseEvent]] = []
+        self.dlq: Deque[DeadLetterEntry] = deque(maxlen=max_dlq_size)
+        self.history: Deque[Tuple[str, WarehouseEvent]] = deque(maxlen=max_history_size)
         self._validators: List[EventValidator] = []
-        self.rejected_events: List[Tuple[str, WarehouseEvent, str]] = []
+        self.rejected_events: Deque[Tuple[str, WarehouseEvent, str]] = deque(maxlen=max_rejected_size)
 
         if enable_default_validation:
             self.add_validator(WarehouseDomainValidator())

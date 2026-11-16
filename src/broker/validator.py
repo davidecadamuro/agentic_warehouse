@@ -13,7 +13,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
-from models import EventType, WarehouseEvent
+from pydantic import BaseModel, ValidationError
+
+from models import EVENT_PAYLOAD_MODELS, EventType, WarehouseEvent
 
 
 @dataclass
@@ -50,7 +52,7 @@ class EventValidator(ABC):
 class WarehouseDomainValidator(EventValidator):
     """
     Core domain guardrail verifying physical plausibility and contract invariants
-    across warehouse workflow events.
+    across warehouse workflow events using typed Pydantic schemas.
     """
 
     @property
@@ -59,57 +61,37 @@ class WarehouseDomainValidator(EventValidator):
 
     def validate(self, topic: str, event: WarehouseEvent) -> ValidationResult:
         """
-        This method requires more sophisticated business intelligence, 
-        at the moment the validation checks are a bit naïve. 
+        Validates event payload against the registered Pydantic contract for its EventType.
+        Catches invalid formats, negative quantities/weights, identical routes, and illegal zones.
         """
-        payload = event.payload
-        if not isinstance(payload, dict):
-            return ValidationResult(is_valid=False, error="Event payload must be a dictionary.")
+        raw_payload = event.payload
+        if isinstance(raw_payload, BaseModel):
+            payload_data = raw_payload.model_dump()
+        elif isinstance(raw_payload, dict):
+            payload_data = raw_payload
+        else:
+            return ValidationResult(is_valid=False, error="Event payload must be a dictionary or BaseModel instance.")
 
-        event_type = event.event_type
+        target_model = EVENT_PAYLOAD_MODELS.get(event.event_type)
+        if not target_model:
+            # If no strict model registered for this event type, accept as valid
+            return ValidationResult(is_valid=True)
 
-        # 1. Inbound validation: Pallet receipt
-        if event_type in (EventType.PALLET_RECEIVED, EventType.PALLET_QUARANTINED):
-            pallet_id = payload.get("pallet_id")
-            if not pallet_id or not isinstance(pallet_id, str):
-                return ValidationResult(is_valid=False, error=f"Missing or invalid 'pallet_id' in {event_type.value}.")
+        try:
+            target_model.model_validate(payload_data)
+            return ValidationResult(is_valid=True)
+        except ValidationError as err:
+            # Extract first human-readable error message
+            first_err = err.errors()[0]
+            field_name = ".".join(str(loc) for loc in first_err.get("loc", []))
+            msg = first_err.get("msg", "Validation error")
+            
+            # Clean up Pydantic 'Value error, ' prefix if present
+            if msg.startswith("Value error, "):
+                clean_msg = msg[len("Value error, "):]
+            elif field_name:
+                clean_msg = f"{field_name}: {msg}"
+            else:
+                clean_msg = msg
 
-            qty = payload.get("quantity")
-            if qty is not None and (not isinstance(qty, int) or qty <= 0):
-                return ValidationResult(is_valid=False, error=f"Quantity must be a positive integer, got: {qty}.")
-
-            weight = payload.get("weight_kg")
-            if weight is not None and (not isinstance(weight, (int, float)) or weight <= 0.0):
-                return ValidationResult(is_valid=False, error=f"Weight must be a positive number, got: {weight}.")
-
-        # 2. Putaway & Transport validation
-        elif event_type in (EventType.PUTAWAY_REQUESTED, EventType.TRANSPORT_DISPATCHED, EventType.PICK_DISPATCHED):
-            pallet_id = payload.get("pallet_id")
-            if not pallet_id:
-                return ValidationResult(is_valid=False, error=f"Missing required 'pallet_id' for transport in {event_type.value}.")
-
-            source = payload.get("source")
-            destination = payload.get("destination")
-            if not source or not destination:
-                return ValidationResult(is_valid=False, error="Transport requires both 'source' and 'destination' locations.")
-
-            if source == destination:
-                return ValidationResult(is_valid=False, error=f"Invalid transport route: source and destination are identical ('{source}').")
-
-        # 3. Outbound order validation
-        elif event_type == EventType.ORDER_SUBMITTED:
-            order_id = payload.get("order_id")
-            if not order_id:
-                return ValidationResult(is_valid=False, error="Missing required 'order_id' in ORDER_SUBMITTED.")
-
-            qty = payload.get("quantity")
-            if qty is None or not isinstance(qty, int) or qty <= 0:
-                return ValidationResult(is_valid=False, error=f"Order quantity must be a positive integer, got: {qty}.")
-
-        # 4. Corridor anomaly validation
-        elif event_type in (EventType.CORRIDOR_BLOCKED, EventType.CORRIDOR_UNBLOCKED):
-            zone_id = payload.get("zone_id")
-            if not zone_id or zone_id not in {"A", "B", "C"}:
-                return ValidationResult(is_valid=False, error=f"Invalid warehouse zone_id '{zone_id}'. Must be A, B, or C.")
-
-        return ValidationResult(is_valid=True)
+            return ValidationResult(is_valid=False, error=clean_msg)

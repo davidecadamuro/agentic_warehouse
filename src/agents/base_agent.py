@@ -98,7 +98,10 @@ class BaseAgent(ABC):
         pass
 
     async def execute_turn(
-        self, user_prompt: str, correlation_id: Optional[str] = None
+        self,
+        user_prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Executes an agent reasoning turn.
@@ -108,7 +111,7 @@ class BaseAgent(ABC):
         logger.info(f"[{self.name}] Turn started. Prompt: {user_prompt[:80]}...")
 
         if self.mock_mode or not self.client:
-            return await self.mock_reasoning(user_prompt, correlation_id)
+            return await self.mock_reasoning(user_prompt, correlation_id, context)
 
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt},
@@ -118,6 +121,7 @@ class BaseAgent(ABC):
         # Multi-step tool invocation loop
         max_iterations = 10
         iteration = 0
+        executed_tool_results: List[Dict[str, Any]] = []
 
         while iteration < max_iterations:
             iteration += 1
@@ -137,6 +141,12 @@ class BaseAgent(ABC):
             if not tool_calls:
                 final_content = response_message.content or ""
                 logger.info(f"[{self.name}] Final response: {final_content[:100]}...")
+                await self.on_turn_completed(
+                    turn_response=final_content,
+                    correlation_id=correlation_id,
+                    context=context,
+                    executed_tools=executed_tool_results,
+                )
                 return final_content
 
             # Execute tool calls requested by the model
@@ -160,6 +170,12 @@ class BaseAgent(ABC):
                 else:
                     tool_result = {"error": f"Unknown tool '{func_name}'"}
 
+                executed_tool_results.append({
+                    "tool_name": func_name,
+                    "arguments": args,
+                    "result": tool_result,
+                })
+
                 # Provide tool output back to model
                 messages.append({
                     "role": "tool",
@@ -167,11 +183,35 @@ class BaseAgent(ABC):
                     "content": json.dumps(tool_result),
                 })
 
-        return "Max tool call iterations reached."
+        final_content = "Max tool call iterations reached."
+        await self.on_turn_completed(
+            turn_response=final_content,
+            correlation_id=correlation_id,
+            context=context,
+            executed_tools=executed_tool_results,
+        )
+        return final_content
+
+    async def on_turn_completed(
+        self,
+        turn_response: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        executed_tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """
+        Post-turn lifecycle hook: Translates successful tool invocations and reasoning
+        conclusions into downstream event emissions. Subclasses override this method
+        to ensure events are emitted in live LLM mode.
+        """
+        pass
 
     @abstractmethod
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic fallback reasoning implementation when no API key is supplied.

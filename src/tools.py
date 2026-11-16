@@ -55,6 +55,7 @@ def register_inbound_pallet(
     weight_kg: float,
     dock_id: str = "DOCK-1",
     condition: PalletCondition = PalletCondition.INTACT,
+    correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Registers a newly unloaded pallet at an inbound receiving dock.
@@ -81,6 +82,7 @@ def register_inbound_pallet(
                 source="SUPPLIER_TRUCK",
                 destination=dock_id,
                 reason=f"Inbound receipt pallet {pallet_id}",
+                correlation_id=correlation_id,
             )
         )
 
@@ -95,7 +97,11 @@ def register_inbound_pallet(
         }
 
 
-def quarantine_pallet(pallet_id: str, reason: str) -> Dict[str, Any]:
+def quarantine_pallet(
+    pallet_id: str,
+    reason: str,
+    correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Marks a pallet as quarantined if damaged or failing QA.
     Moves it to the inspection quarantine bay.
@@ -117,6 +123,7 @@ def quarantine_pallet(pallet_id: str, reason: str) -> Dict[str, Any]:
                 source=prev_loc,
                 destination="QUARANTINE-BAY",
                 reason=f"Quarantined: {reason}",
+                correlation_id=correlation_id,
             )
         )
 
@@ -232,7 +239,11 @@ def query_available_vehicles(min_capacity_kg: float = 0.0) -> List[Dict[str, Any
 
 
 def dispatch_transport_mission(
-    pallet_id: str, source: str, destination: str, preferred_vehicle_id: Optional[str] = None
+    pallet_id: str,
+    source: str,
+    destination: str,
+    preferred_vehicle_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Assigns an AGV or Forklift to transport a pallet from source to destination.
@@ -270,6 +281,7 @@ def dispatch_transport_mission(
             source_location=source,
             destination_location=destination,
             status="IN_TRANSIT",
+            correlation_id=correlation_id,
         )
         WAREHOUSE_DB.missions[mission_id] = mission
 
@@ -286,7 +298,10 @@ def dispatch_transport_mission(
         }
 
 
-def complete_transport_mission(mission_id: str) -> Dict[str, Any]:
+def complete_transport_mission(
+    mission_id: str,
+    correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Signals that a transport mission has successfully arrived and unloaded.
     Updates the pallet's physical location, bin status, and frees the vehicle.
@@ -301,6 +316,9 @@ def complete_transport_mission(mission_id: str) -> Dict[str, Any]:
 
         if not vehicle or not pallet:
             return {"success": False, "error": "Inconsistent state: vehicle or pallet missing."}
+
+        # Resolve correlation ID from call or fallback to mission
+        eff_correlation_id = correlation_id or mission.correlation_id
 
         # Physical location updates
         prev_location = pallet.current_location
@@ -320,12 +338,18 @@ def complete_transport_mission(mission_id: str) -> Dict[str, Any]:
             target_bin.current_pallet_id = pallet.pallet_id
             target_bin.reserved_by = None
 
-        # If removed from a bin, free the source bin
+        # If removed from a bin, handle source bin state
         source_bin = WAREHOUSE_DB.bins.get(mission.source_location)
         if source_bin:
-            source_bin.status = BinStatus.EMPTY
-            source_bin.current_pallet_id = None
-            source_bin.reserved_by = None
+            if mission.destination_location.startswith("PACKING-BAY"):
+                # Pallet moved to packing bay for picking; reserve source bin for return putaway
+                source_bin.status = BinStatus.RESERVED_PUTAWAY
+                source_bin.current_pallet_id = None
+                source_bin.reserved_by = pallet.pallet_id
+            else:
+                source_bin.status = BinStatus.EMPTY
+                source_bin.current_pallet_id = None
+                source_bin.reserved_by = None
 
         # Ledger record
         WAREHOUSE_DB.ledger.append(
@@ -336,6 +360,7 @@ def complete_transport_mission(mission_id: str) -> Dict[str, Any]:
                 source=prev_location,
                 destination=mission.destination_location,
                 reason=f"Transport mission {mission_id} completed",
+                correlation_id=eff_correlation_id,
             )
         )
 
@@ -353,7 +378,12 @@ def complete_transport_mission(mission_id: str) -> Dict[str, Any]:
 # 4. Outbound Order & Picking Tools
 # ==============================================================================
 
-def check_and_reserve_stock(sku: str, quantity: int, order_id: str) -> Dict[str, Any]:
+def check_and_reserve_stock(
+    sku: str,
+    quantity: int,
+    order_id: str,
+    correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Searches occupied storage bins for matching available stock of a given SKU.
     Atomically allocates pallets and transitions bins to RESERVED_PICK.
@@ -391,6 +421,7 @@ def check_and_reserve_stock(sku: str, quantity: int, order_id: str) -> Dict[str,
                 quantity=alloc_qty,
                 bin_id=b.bin_id,
                 pallet_id=p.pallet_id,
+                correlation_id=correlation_id,
             )
             WAREHOUSE_DB.allocations[alloc_id] = alloc
 
@@ -416,7 +447,11 @@ def check_and_reserve_stock(sku: str, quantity: int, order_id: str) -> Dict[str,
         }
 
 
-def pack_and_dispatch_order(order_id: str, dispatch_dock: str = "OUTBOUND-DOCK-1") -> Dict[str, Any]:
+def pack_and_dispatch_order(
+    order_id: str,
+    dispatch_dock: str = "OUTBOUND-DOCK-1",
+    correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Completes packing for an order, depleting the allocated inventory
     and writing closing entries to the ledger.
@@ -428,13 +463,30 @@ def pack_and_dispatch_order(order_id: str, dispatch_dock: str = "OUTBOUND-DOCK-1
         if not order_allocations:
             return {"success": False, "error": f"No active allocations found for order '{order_id}'."}
 
+        # Resolve correlation_id: prefer explicit, fallback to first allocation's correlation_id
+        eff_correlation_id = correlation_id or (order_allocations[0].correlation_id if order_allocations else None)
+
         dispatched_items = []
+        residual_pallets = []
         for alloc in order_allocations:
             pallet = WAREHOUSE_DB.pallets.get(alloc.pallet_id)
             if pallet:
                 pallet.quantity -= alloc.quantity
                 if pallet.quantity <= 0:
                     pallet.current_location = "SHIPPED"
+                    # Free the reserved return bin if pallet is completely depleted
+                    bin_obj = WAREHOUSE_DB.bins.get(alloc.bin_id)
+                    if bin_obj and bin_obj.reserved_by == pallet.pallet_id:
+                        bin_obj.status = BinStatus.EMPTY
+                        bin_obj.reserved_by = None
+                else:
+                    residual_pallets.append({
+                        "pallet_id": pallet.pallet_id,
+                        "remaining_quantity": pallet.quantity,
+                        "return_bin_id": alloc.bin_id,
+                        "sku": pallet.sku,
+                        "weight_kg": pallet.weight_kg,
+                    })
 
                 WAREHOUSE_DB.ledger.append(
                     LedgerEntry(
@@ -444,6 +496,7 @@ def pack_and_dispatch_order(order_id: str, dispatch_dock: str = "OUTBOUND-DOCK-1
                         source=alloc.bin_id,
                         destination=dispatch_dock,
                         reason=f"Order fulfillment: {order_id}",
+                        correlation_id=eff_correlation_id,
                     )
                 )
                 dispatched_items.append({"sku": alloc.sku, "quantity": alloc.quantity})
@@ -453,6 +506,7 @@ def pack_and_dispatch_order(order_id: str, dispatch_dock: str = "OUTBOUND-DOCK-1
             "order_id": order_id,
             "dispatched_to": dispatch_dock,
             "items": dispatched_items,
+            "residual_pallets": residual_pallets,
             "status": "DISPATCHED",
         }
 
@@ -509,6 +563,7 @@ def audit_ledger_history(limit: int = 20) -> List[Dict[str, Any]]:
                 "from": entry.source,
                 "to": entry.destination,
                 "reason": entry.reason,
+                "correlation_id": entry.correlation_id,
                 "timestamp": entry.timestamp.isoformat(),
             }
             for entry in WAREHOUSE_DB.ledger[-limit:]

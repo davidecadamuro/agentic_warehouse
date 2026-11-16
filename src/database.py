@@ -8,7 +8,8 @@ bins, pallets, vehicles, missions, allocations, and the financial/inventory ledg
 from __future__ import annotations
 
 import threading
-from typing import Dict, List, Set
+from collections import deque
+from typing import Deque, Dict, List, Set
 
 from models import (
     LedgerEntry,
@@ -23,8 +24,9 @@ from models import (
 class WarehouseDatabase:
     """Thread-safe transactional in-memory state repository (Blackboard)."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_ledger_size: int = 5000) -> None:
         self._lock = threading.RLock()
+        self._max_ledger_size = max_ledger_size
 
         # Inbound ASN manifests: asn_id -> dict of expected SKUs and quantities
         self.asn_manifests: Dict[str, Dict[str, int]] = {
@@ -49,8 +51,8 @@ class WarehouseDatabase:
         # Inventory Allocations: allocation_id -> StockAllocation
         self.allocations: Dict[str, StockAllocation] = {}
 
-        # Financial/Inventory Ledger
-        self.ledger: List[LedgerEntry] = []
+        # Financial/Inventory Ledger bounded by circular buffer
+        self.ledger: Deque[LedgerEntry] = deque(maxlen=max_ledger_size)
 
         # Blocked corridors
         self.blocked_zones: Set[str] = set()

@@ -101,7 +101,7 @@ class TestInMemoryBroker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bus.rejected_events), 1)
         topic, ev, reason = self.bus.rejected_events[0]
         self.assertEqual(topic, "warehouse.inbound.pallet_received")
-        self.assertIn("Quantity must be a positive integer", reason)
+        self.assertTrue("greater than 0" in reason or "positive" in reason.lower())
 
     async def test_validator_gate_blocks_identical_source_and_destination(self) -> None:
         """Transport event with identical source and destination is caught and rejected."""
@@ -123,6 +123,47 @@ class TestInMemoryBroker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(downstream_events), 0)
         self.assertEqual(len(self.bus.rejected_events), 1)
         self.assertIn("source and destination are identical", self.bus.rejected_events[0][2])
+
+    async def test_diagnostic_collections_respect_configured_max_capacity(self) -> None:
+        """History, DLQ, and rejected_events collections maintain strict bounds when capacity is reached."""
+        bounded_bus = InMemoryEventBus(
+            max_history_size=3,
+            max_dlq_size=2,
+            max_rejected_size=2,
+        )
+        await bounded_bus.start()
+
+        # 1. Test bounded history (publish 5 valid events with limit 3)
+        for i in range(5):
+            ev = WarehouseEvent(
+                event_type=EventType.PALLET_RECEIVED,
+                payload={"pallet_id": f"PLT-{i}", "sku": "SKU-TEST", "quantity": 10},
+            )
+            await bounded_bus.publish("warehouse.inbound.pallet_received", ev)
+
+        await bounded_bus.wait_until_idle()
+
+        # Must keep only the 3 most recent events
+        self.assertEqual(len(bounded_bus.history), 3)
+        retained_pallet_ids = [e[1].payload["pallet_id"] for e in bounded_bus.history]
+        self.assertEqual(retained_pallet_ids, ["PLT-2", "PLT-3", "PLT-4"])
+
+        # 2. Test bounded rejected events (publish 4 invalid events with limit 2)
+        for i in range(4):
+            bad_ev = WarehouseEvent(
+                event_type=EventType.PALLET_RECEIVED,
+                payload={"pallet_id": f"PLT-BAD-{i}", "quantity": -10},
+            )
+            await bounded_bus.publish("warehouse.inbound.pallet_received", bad_ev)
+
+        await bounded_bus.wait_until_idle()
+
+        # Must keep only the 2 most recent rejected events
+        self.assertEqual(len(bounded_bus.rejected_events), 2)
+        retained_bad_pids = [e[1].payload["pallet_id"] for e in bounded_bus.rejected_events]
+        self.assertEqual(retained_bad_pids, ["PLT-BAD-2", "PLT-BAD-3"])
+
+        await bounded_bus.stop()
 
 
 if __name__ == "__main__":

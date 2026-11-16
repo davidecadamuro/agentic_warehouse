@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
 from broker.base import EventBus
@@ -41,6 +43,7 @@ class ReceivingAgent(BaseAgent):
         self,
         event_bus: EventBus,
         model: str = "gpt-4o-mini",
+        client: Optional[AsyncOpenAI] = None,
         mock_mode: Optional[bool] = None,
     ) -> None:
         super().__init__(
@@ -48,6 +51,7 @@ class ReceivingAgent(BaseAgent):
             system_prompt=RECEIVING_SYSTEM_PROMPT,
             event_bus=event_bus,
             model=model,
+            client=client,
             mock_mode=mock_mode,
         )
         self._setup_tools()
@@ -125,10 +129,51 @@ class ReceivingAgent(BaseAgent):
             f"Verify the ASN and register or quarantine each pallet accordingly."
         )
 
-        await self.execute_turn(prompt, correlation_id=event.correlation_id)
+        await self.execute_turn(prompt, correlation_id=event.correlation_id, context=payload)
+
+    async def on_turn_completed(
+        self,
+        turn_response: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        executed_tools: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        """Emits pallet received/quarantined events based on executed tools in live mode."""
+        if not executed_tools:
+            return
+
+        for tool in executed_tools:
+            tool_name = tool.get("tool_name")
+            result = tool.get("result", {})
+            if not result.get("success"):
+                continue
+
+            if tool_name == "register_inbound_pallet":
+                await self.publish(
+                    "warehouse.inbound.pallet_received",
+                    WarehouseEvent(
+                        event_type=EventType.PALLET_RECEIVED,
+                        payload=result,
+                        correlation_id=correlation_id or "CORR-INBOUND-LIVE",
+                        source_agent=self.name,
+                    ),
+                )
+            elif tool_name == "quarantine_pallet":
+                await self.publish(
+                    "warehouse.inbound.pallet_quarantined",
+                    WarehouseEvent(
+                        event_type=EventType.PALLET_QUARANTINED,
+                        payload=result,
+                        correlation_id=correlation_id or "CORR-QUARANTINE-LIVE",
+                        source_agent=self.name,
+                    ),
+                )
 
     async def mock_reasoning(
-        self, prompt: str, correlation_id: Optional[str] = None
+        self,
+        prompt: str,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic mock reasoning loop mirroring the LLM decision path.
@@ -146,8 +191,13 @@ class ReceivingAgent(BaseAgent):
                 weight_kg=150.0,
                 dock_id="DOCK-1",
                 condition=PalletCondition.DAMAGED,
+                correlation_id=correlation_id,
             )
-            q_res = quarantine_pallet(reg_res["pallet_id"], "Damaged packaging upon arrival")
+            q_res = quarantine_pallet(
+                reg_res["pallet_id"],
+                "Damaged packaging upon arrival",
+                correlation_id=correlation_id,
+            )
             summary.append(f"Quarantined: {q_res}")
 
             await self.publish(
@@ -170,6 +220,7 @@ class ReceivingAgent(BaseAgent):
                 weight_kg=350.0,
                 dock_id="DOCK-1",
                 condition=PalletCondition.INTACT,
+                correlation_id=correlation_id,
             )
             summary.append(f"Registered: {reg_res['pallet_id']}")
 
@@ -190,6 +241,7 @@ class ReceivingAgent(BaseAgent):
                 quantity=50,
                 weight_kg=200.0,
                 dock_id="DOCK-1",
+                correlation_id=correlation_id,
             )
             await self.publish(
                 "warehouse.inbound.pallet_received",

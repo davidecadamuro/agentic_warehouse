@@ -363,10 +363,10 @@ flowchart TD
 
 To simulate and test this architecture locally without external infrastructure dependencies, the code is organized into a modular structure under `src/`:
 
-1. **`src/models.py`**: Data contracts for domain entities (`StorageBin`, `Pallet`, `TransportVehicle`, `TransportMission`, `StockAllocation`, `LedgerEntry`) and standard `WarehouseEvent` message envelopes.
-2. **`src/database.py`**: Thread-safe transactional in-memory database (`WarehouseDatabase` / Blackboard) maintaining physical layouts, vehicle registries, bin occupancy, and the inventory ledger with reset and snapshot capabilities.
+1. **`src/models.py`**: Data contracts for domain entities (`StorageBin`, `Pallet`, `TransportVehicle`, `TransportMission`, `StockAllocation`, `LedgerEntry`), Pydantic V2 payload contracts, and standard `WarehouseEvent` message envelopes.
+2. **`src/database.py`**: Thread-safe transactional in-memory database (`WarehouseDatabase` / Blackboard) maintaining physical layouts, vehicle registries, bin occupancy, and the inventory ledger with reset, snapshot, and causal tracing capabilities (see [docs/database.md](docs/database.md)).
 3. **`src/tools.py`**: Deterministic Python tool layer enforcing physical invariants, atomic reservation locks, and ledger transactions against `WarehouseDatabase`.
-4. **`src/broker/`**: Pluggable publish/subscribe event exchange subsystem containing the abstract `EventBus` interface (`src/broker/base.py`) and the high-performance async in-memory broker (`src/broker/memory_bus.py`) supporting topic wildcards (`*`, `#`) and Dead-Letter Queues (DLQ).
+4. **`src/broker/`**: Pluggable publish/subscribe event exchange subsystem containing the abstract `EventBus` interface (`src/broker/base.py`), Pydantic validation gates (`src/broker/validator.py`), and the high-performance async in-memory broker (`src/broker/memory_bus.py`) supporting topic wildcards (`*`, `#`) and Dead-Letter Queues (DLQ).
 5. **`src/agents/`**: Autonomous agent classes built with the OpenAI SDK function-calling loop, reaction handlers, tool invocation, and offline simulation fallback.
-6. **`src/tests/`**: Unit and integration test suites (`unittest.IsolatedAsyncioTestCase`) validating broker routing, DLQ containment, and individual agent behaviors.
+6. **`src/tests/`**: Unit and integration test suites (`unittest.IsolatedAsyncioTestCase`) validating broker routing, DLQ containment, causal tracing, and individual agent behaviors.
 7. **`src/simulation.py`**: A scenario runner demonstrating concurrent inbound putaway, outbound order picking, and automated exception recovery.
