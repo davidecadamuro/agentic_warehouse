@@ -370,3 +370,14 @@ To simulate and test this architecture locally without external infrastructure d
 5. **`src/agents/`**: Autonomous agent classes built with the OpenAI SDK function-calling loop, reaction handlers, tool invocation, and offline simulation fallback.
 6. **`src/tests/`**: Unit and integration test suites (`unittest.IsolatedAsyncioTestCase`) validating broker routing, DLQ containment, causal tracing, and individual agent behaviors.
 7. **`src/simulation.py`**: A scenario runner demonstrating concurrent inbound putaway, outbound order picking, and automated exception recovery.
+
+---
+
+## 10. Architectural Documentation Inventory
+
+For deep dives into individual subsystems, refer to the dedicated documentation files:
+- **[docs/database.md](docs/database.md)**: Digital twin / Blackboard state model, ERD schema, and concurrency locks.
+- **[docs/broker.md](docs/broker.md)**: Publish/subscribe messaging contracts, topic wildcards, and Dead-Letter Queue (DLQ).
+- **[docs/tools.md](docs/tools.md)**: Deterministic invariant tools, bin state machines, and return putaway logic.
+- **[docs/agents.md](docs/agents.md)**: Autonomous agent personas, OpenAI SDK function-calling loops, and event reaction mappings.
+- **[docs/auditability.md](docs/auditability.md)**: Three-tier governance, end-to-end causal tracing (`correlation_id`), double-entry inventory ledger, and cognitive trace auditing.
