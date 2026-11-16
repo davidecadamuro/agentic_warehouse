@@ -117,7 +117,9 @@ If `WAREHOUSE_MOCK_MODE` is not set, the project falls back to the presence of `
 - `OPENAI_API_KEY` missing => mock mode is enabled automatically
 - `OPENAI_API_KEY` present => live OpenAI mode is used unless overridden by the CLI or environment
 
-If `OPENAI_MODEL` is not set, the default model is `gpt-6-luna`.
+If `OPENAI_MODEL` is not set, the default model is `gpt-5.4-nano`.
+
+Modern Open AI models like `gpt-6-luna` are not supported.
 
 ## Documentation
 

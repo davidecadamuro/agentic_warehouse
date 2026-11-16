@@ -55,7 +55,7 @@ def resolve_mock_mode(mock_mode: Optional[bool] = None) -> bool:
 def resolve_model(model: Optional[str] = None) -> str:
     if model is not None:
         return model
-    return os.getenv("OPENAI_MODEL", "gpt-6-luna")
+    return os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
 
 async def run_simulation(mock_mode: Optional[bool] = None, model: Optional[str] = None) -> None:
