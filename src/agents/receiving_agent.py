@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from agents.base_agent import BaseAgent
 from broker.base import EventBus

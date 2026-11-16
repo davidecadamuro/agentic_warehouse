@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageToolCall
 
 from broker.base import EventBus, EventHandler
-from models import EventType, WarehouseEvent
+from models import WarehouseEvent
 
 logger = logging.getLogger("warehouse.agent")
 

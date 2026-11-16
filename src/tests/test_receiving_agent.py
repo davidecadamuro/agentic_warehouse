@@ -4,7 +4,6 @@ Warehouse Swarm Simulation - Unit Tests for ReceivingAgent and Broker.
 
 from __future__ import annotations
 
-import asyncio
 import unittest
 
 from agents import ReceivingAgent

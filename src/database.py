@@ -11,14 +11,12 @@ import threading
 from typing import Dict, List, Set
 
 from models import (
-    BinStatus,
     LedgerEntry,
     Pallet,
     StockAllocation,
     StorageBin,
     TransportMission,
     TransportVehicle,
-    VehicleStatus,
 )
 
 
