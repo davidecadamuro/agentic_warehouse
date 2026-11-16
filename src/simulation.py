@@ -49,7 +49,7 @@ def resolve_mock_mode(mock_mode: Optional[bool] = None) -> bool:
             return False
         raise ValueError("WAREHOUSE_MOCK_MODE must be set to either 'True' or 'False'.")
 
-    return False
+    return True
 
 
 def resolve_model(model: Optional[str] = None) -> str:
