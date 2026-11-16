@@ -96,7 +96,14 @@ Default validation is provided by `WarehouseDomainValidator`:
 - **Orders**: Enforces non-empty `order_id` and positive `quantity > 0`.
 - **Corridors**: Enforces recognized zone codes (`A`, `B`, `C`).
 
-### 4.4 Simulation Testing Utility
+### 4.4 Agent Reaction to Rejection and Dead-Letter Events
+When messages fail validation or trigger consumer crashes, the broker isolates the failure and enables three agent recovery patterns:
+
+1. **Self-Correction Loop**: The publishing agent subscribes to rejections associated with its correlation ID. It receives the validator error as a critique prompt and re-invokes tools to publish a compliant event.
+2. **Compensatory Rollback (Saga)**: If intermediate state was locked prior to the rejection (e.g. `reserve_bin_for_putaway`), the agent issues a compensation call (`release_bin_reservation`) to avoid stranded reservations.
+3. **Exception Escalation**: `ExceptionAgent` listens on `warehouse.validation.rejected` and DLQ events, cordons off corrupted resources, and flags alerts for human supervisors when retries are exhausted.
+
+### 4.5 Simulation Testing Utility
 - `wait_until_idle()`: Awaits the underlying `asyncio.Queue.join()` so tests and simulations can cleanly block until all in-flight events are fully consumed before asserting state.
 
 ---

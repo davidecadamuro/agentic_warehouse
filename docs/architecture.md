@@ -307,6 +307,39 @@ When an event fails an inter-stage validator gate:
 - It is recorded in `InMemoryEventBus.rejected_events` with the offending topic, event envelope, and validator error message.
 - A synthetic audit event is published to `warehouse.validation.rejected` for monitoring and supervisor alerting.
 
+### 7.3 Agent Reaction Patterns to Rejections and Dead-Letter Events
+
+When a message is rejected by a validation gate or lands in a Dead-Letter Queue (DLQ), the agent swarm responds via three complementary patterns:
+
+```mermaid
+flowchart TD
+    Rejection[Validation Rejection / DLQ Event] --> Choice{Resolution Strategy}
+    Choice -->|Transient Hallucination / Format Error| Loop[1. Self-Correction Reflection Loop]
+    Choice -->|State Mutation Already Occurred| Rollback[2. Saga Compensatory Rollback]
+    Choice -->|Unrecoverable / Retry Exhausted| Escalate[3. Exception Agent Triage & Alert]
+    
+    Loop -->|Re-evaluates Tools with Error Feedback| Reproposed[Re-publish Corrected Event]
+    Rollback -->|Calls Release Tools| Restored[Restore Bin/Stock State]
+    Escalate -->|Locks Area & Human Ticket| Manual[Human Supervisor Intervention]
+```
+
+1. **Pattern A: The Self-Correction Reflection Loop (Actor Reflection)**
+   - When an agent publishes an invalid event (e.g., `PutawayAgent` proposing a destination bin identical to the pickup dock), the broker validator blocks the message and routes feedback back to the producing agent.
+   - The agent ingests the error message as a reflection prompt:
+     > *"Your previous event on 'warehouse.transport.requested' was rejected: Source and destination are identical ('DOCK-1'). Re-examine available bins via find_candidate_bins and choose a valid empty storage rack."*
+   - Because LLMs excel at error-directed self-correction, the agent re-plans, invokes tools with valid parameters, and re-publishes.
+
+2. **Pattern B: Saga Rollback (Compensatory Transactions)**
+   - If an agent modified physical or database state *prior* to publishing an event that subsequently failed validation, it must roll back those intermediate mutations.
+   - *Example*: `PutawayAgent` locks a bin to `RESERVED_PUTAWAY` via `reserve_bin_for_putaway()`. If its follow-up `PUTAWAY_REQUESTED` event is rejected and unrecoverable, the agent triggers a compensatory call to `release_bin_reservation(bin_id)` so the rack shelf does not remain permanently blocked.
+
+3. **Pattern C: Escalation & Exception Agent Triage**
+   - The `ExceptionAgent` subscribes to `warehouse.validation.rejected` and consumer DLQ feeds.
+   - If an event is rejected repeatedly (retry budget exhausted) or indicates data corruption (e.g., untracked SKU, unresolvable route):
+     1. It cordons off the affected bin or isolates the physical pallet in quarantine.
+     2. It cancels dependent downstream tasks.
+     3. It files an incident ticket with the correlation ID, event payload, and validator trace for human floor supervisors.
+
 ---
 
 ## 8. Concurrency, Race Conditions & Failure Modes
